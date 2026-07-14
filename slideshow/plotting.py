@@ -30,6 +30,14 @@ from .config import (
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
+def _last_valid_value(values):
+    """Return the last non-NaN value in a series, or None if all NaN."""
+    valid = values.notna()
+    if not valid.any():
+        return None
+    return values[valid].iloc[-1]
+
+
 def _annotate_last_point(ax, dates, values, color="black", fmt="{:.1f}"):
     """Annotate the last valid point of a series with an arrow + text box."""
     valid = values.notna()
@@ -48,6 +56,13 @@ def _annotate_last_point(ax, dates, values, color="black", fmt="{:.1f}"):
     )
 
 
+def _labeled(label, value, fmt="{:.1f}"):
+    """Append a formatted latest/level value to a legend label, if available."""
+    if value is None or pd.isna(value):
+        return label
+    return f"{label}: {fmt.format(value)}"
+
+
 # ── Main plotting function ─────────────────────────────────────────────────────
 
 def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
@@ -61,7 +76,8 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     bond_history : pd.DataFrame
         Merged bond/CDS history with columns ``ticker``, ``date``, ``cds_spread``,
         ``G_Spread``, ``basis_spread``, ``basis_price``, ``SECURITY_NAME``,
-        ``target_cds_maturity``, ``Markit_ShortName``.
+        ``target_cds_maturity``, ``Markit_ShortName``, and optionally
+        ``cds_spread_5y`` (5Y CDS spread, plotted as a green dotted line if present).
     start_date, end_date : str or None
         Optional ISO-date strings to restrict the plotted time range.
 
@@ -95,8 +111,23 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     fig.suptitle(markit_shortname, fontsize=SUPTITLE_FONTSIZE, fontweight="bold")
 
     ax = axes[0]
-    ax.plot(plot_data["date"], plot_data["cds_spread"], color="red", label=f"CDS Spread (Mat: {cds_maturity_used})")
-    ax.plot(plot_data["date"], plot_data["G_Spread"], color="blue", label="G-Spread")
+    last_cds_spread = _last_valid_value(plot_data["cds_spread"])
+    last_g_spread = _last_valid_value(plot_data["G_Spread"])
+    ax.plot(
+        plot_data["date"], plot_data["cds_spread"], color="red",
+        label=_labeled(f"CDS Spread (Mat: {cds_maturity_used})", last_cds_spread),
+    )
+    ax.plot(
+        plot_data["date"], plot_data["G_Spread"], color="blue",
+        label=_labeled("G-Spread", last_g_spread),
+    )
+    if "cds_spread_5y" in plot_data.columns:
+        last_cds_spread_5y = _last_valid_value(plot_data["cds_spread_5y"])
+        ax.plot(
+            plot_data["date"], plot_data["cds_spread_5y"], color="green", linestyle=":",
+            label=_labeled("5Y CDS Spread", last_cds_spread_5y),
+        )
+        _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread_5y"], color="green")
     _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread"], color="red")
     _annotate_last_point(ax, plot_data["date"], plot_data["G_Spread"], color="blue")
     ax.set_title(f"{ticker} ({security_name}) CDS Spread vs G-Spread over time", fontsize=TITLE_FONTSIZE)
@@ -106,11 +137,11 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     ax = axes[1]
     ax.plot(plot_data["date"], plot_data["basis_spread"], color="tab:blue")
     _annotate_last_point(ax, plot_data["date"], plot_data["basis_spread"], color="tab:blue")
-    ax.axhline(mean_basis_spread, color="black", linestyle="--", linewidth=1, alpha=1, label="Mean")
-    ax.axhline(mean_basis_spread + std_basis_spread, color="gold", linestyle="--", linewidth=1.2, alpha=1, label="+/-1 std")
-    ax.axhline(mean_basis_spread - std_basis_spread, color="gold", linestyle="--", linewidth=1.2, alpha=1)
-    ax.axhline(mean_basis_spread + 2 * std_basis_spread, color="red", linestyle="--", linewidth=1.2, alpha=1, label="+/-2 std")
-    ax.axhline(mean_basis_spread - 2 * std_basis_spread, color="red", linestyle="--", linewidth=1.2, alpha=1)
+    ax.axhline(mean_basis_spread, color="black", linestyle="--", linewidth=1, alpha=1, label=_labeled("Mean", mean_basis_spread))
+    ax.axhline(mean_basis_spread + std_basis_spread, color="gold", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("+1 std", mean_basis_spread + std_basis_spread))
+    ax.axhline(mean_basis_spread - std_basis_spread, color="gold", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("-1 std", mean_basis_spread - std_basis_spread))
+    ax.axhline(mean_basis_spread + 2 * std_basis_spread, color="red", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("+2 std", mean_basis_spread + 2 * std_basis_spread))
+    ax.axhline(mean_basis_spread - 2 * std_basis_spread, color="red", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("-2 std", mean_basis_spread - 2 * std_basis_spread))
     ax.set_title(f"{ticker} ({security_name}) Spread Basis (CDS Spread - GSpread) over time", fontsize=TITLE_FONTSIZE)
     ax.set_ylabel("Spread Basis (bps)", fontsize=LABEL_FONTSIZE)
     ax.legend(fontsize=LEGEND_FONTSIZE)
@@ -118,11 +149,11 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     ax = axes[2]
     ax.plot(plot_data["date"], plot_data["basis_price"], color="tab:blue")
     _annotate_last_point(ax, plot_data["date"], plot_data["basis_price"], color="tab:blue", fmt="${:,.1f}")
-    ax.axhline(mean_basis_price, color="black", linestyle="--", linewidth=1, alpha=1, label="Mean")
-    ax.axhline(mean_basis_price + std_basis_price, color="gold", linestyle="--", linewidth=1.2, alpha=1, label="+/-1 std")
-    ax.axhline(mean_basis_price - std_basis_price, color="gold", linestyle="--", linewidth=1.2, alpha=1)
-    ax.axhline(mean_basis_price + 2 * std_basis_price, color="red", linestyle="--", linewidth=1.2, alpha=1, label="+/-2 std")
-    ax.axhline(mean_basis_price - 2 * std_basis_price, color="red", linestyle="--", linewidth=1.2, alpha=1)
+    ax.axhline(mean_basis_price, color="black", linestyle="--", linewidth=1, alpha=1, label=_labeled("Mean", mean_basis_price, fmt="${:,.1f}"))
+    ax.axhline(mean_basis_price + std_basis_price, color="gold", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("+1 std", mean_basis_price + std_basis_price, fmt="${:,.1f}"))
+    ax.axhline(mean_basis_price - std_basis_price, color="gold", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("-1 std", mean_basis_price - std_basis_price, fmt="${:,.1f}"))
+    ax.axhline(mean_basis_price + 2 * std_basis_price, color="red", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("+2 std", mean_basis_price + 2 * std_basis_price, fmt="${:,.1f}"))
+    ax.axhline(mean_basis_price - 2 * std_basis_price, color="red", linestyle="--", linewidth=1.2, alpha=1, label=_labeled("-2 std", mean_basis_price - 2 * std_basis_price, fmt="${:,.1f}"))
     ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.1f}"))
     ax.set_title(f"{ticker} ({security_name}) Price Basis (Upfront + Bond Price) over time", fontsize=TITLE_FONTSIZE)
     ax.set_ylabel("Price Basis", fontsize=LABEL_FONTSIZE)
