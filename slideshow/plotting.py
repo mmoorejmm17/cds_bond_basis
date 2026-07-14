@@ -19,6 +19,7 @@ from IPython.display import HTML
 from .config import (
     FIGSIZE,
     FIG_DPI,
+    SUPTITLE_FONTSIZE,
     TITLE_FONTSIZE,
     LABEL_FONTSIZE,
     LEGEND_FONTSIZE,
@@ -60,7 +61,7 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     bond_history : pd.DataFrame
         Merged bond/CDS history with columns ``ticker``, ``date``, ``cds_spread``,
         ``G_Spread``, ``basis_spread``, ``basis_price``, ``SECURITY_NAME``,
-        ``target_cds_maturity``.
+        ``target_cds_maturity``, ``Markit_ShortName``.
     start_date, end_date : str or None
         Optional ISO-date strings to restrict the plotted time range.
 
@@ -81,6 +82,7 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
         plot_data = plot_data[plot_data["date"] <= pd.to_datetime(end_date)]
 
     security_name = plot_data["SECURITY_NAME"].iloc[0]
+    markit_shortname = plot_data["Markit_ShortName"].iloc[0]
     cds_maturity_used = pd.Timestamp(plot_data["target_cds_maturity"].iloc[0]).strftime("%Y-%m-%d")
 
     mean_basis_spread = plot_data["basis_spread"].mean()
@@ -90,6 +92,7 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     std_basis_price = plot_data["basis_price"].std()
 
     fig, axes = plt.subplots(3, 1, figsize=FIGSIZE, sharex=True)
+    fig.suptitle(markit_shortname, fontsize=SUPTITLE_FONTSIZE, fontweight="bold")
 
     ax = axes[0]
     ax.plot(plot_data["date"], plot_data["cds_spread"], color="red", label=f"CDS Spread (Mat: {cds_maturity_used})")
@@ -131,7 +134,7 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
         ax.tick_params(axis="x", labelrotation=45, labelsize=X_TICK_FONTSIZE)
         ax.set_xlabel("Date", fontsize=LABEL_FONTSIZE)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=FIG_DPI, bbox_inches="tight", facecolor="white")
