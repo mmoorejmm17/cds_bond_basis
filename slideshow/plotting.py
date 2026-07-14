@@ -113,13 +113,18 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     ax = axes[0]
     last_cds_spread = _last_valid_value(plot_data["cds_spread"])
     last_g_spread = _last_valid_value(plot_data["G_Spread"])
+    g_spread_label = _labeled("G-Spread", last_g_spread)
+    if "Benchmark_Spread" in plot_data.columns:
+        last_benchmark_spread = _last_valid_value(plot_data["Benchmark_Spread"])
+        if last_benchmark_spread is not None:
+            g_spread_label = f"{g_spread_label} (bnchmrk sprd: {last_benchmark_spread:.1f})"
     ax.plot(
         plot_data["date"], plot_data["cds_spread"], color="red",
         label=_labeled(f"CDS Spread (Mat: {cds_maturity_used})", last_cds_spread),
     )
     ax.plot(
         plot_data["date"], plot_data["G_Spread"], color="blue",
-        label=_labeled("G-Spread", last_g_spread),
+        label=g_spread_label,
     )
     if "cds_spread_5y" in plot_data.columns:
         last_cds_spread_5y = _last_valid_value(plot_data["cds_spread_5y"])
@@ -130,6 +135,10 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
         _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread_5y"], color="green")
     _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread"], color="red")
     _annotate_last_point(ax, plot_data["date"], plot_data["G_Spread"], color="blue")
+    if "LAST_PRICE" in plot_data.columns:
+        last_bond_price = _last_valid_value(plot_data["LAST_PRICE"])
+        if last_bond_price is not None:
+            ax.plot([], [], color="none", label=_labeled("Bond Price", last_bond_price, fmt="${:,.2f}"))
     ax.set_title(f"{ticker} ({security_name}) CDS Spread vs G-Spread over time", fontsize=TITLE_FONTSIZE)
     ax.set_ylabel("Spread (bps)", fontsize=LABEL_FONTSIZE)
     ax.legend(fontsize=LEGEND_FONTSIZE)
