@@ -1,8 +1,8 @@
 from pathlib import Path
 
 # ── Chart size config ──────────────────────────────────────────────────────────
-FIGSIZE  = (7, 10.5)  # (width, height) in inches
-FIG_DPI  = 90
+FIGSIZE  = (10.5, 12)  # (width, height) in inches — extra width reserves room for legends placed outside the axes
+FIG_DPI  = 105
 
 FONT_SCALE           = 0.75  # matches the 25%-smaller-fonts pass applied to the notebook
 SUPTITLE_FONTSIZE    = 10 * 1.5 * FONT_SCALE
