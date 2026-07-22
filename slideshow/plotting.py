@@ -10,6 +10,7 @@ plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None)
 import io
 import base64
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -31,8 +32,8 @@ from .config import (
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
 # All plotted lines (data series and mean/std reference lines) are drawn at
-# 80% of their nominal alpha and linewidth.
-_LINE_ALPHA = 0.8
+# 60% of their nominal alpha and 80% of their nominal linewidth.
+_LINE_ALPHA = 0.6
 _LINE_WIDTH_SCALE = 0.8
 
 # Percentile thresholds beyond which a series' legend text is flagged.
@@ -41,6 +42,17 @@ _PERCENTILE_HIGH = 80
 
 # Ensures the last-point annotation always draws above plotted lines/gridlines.
 _ANNOTATION_ZORDER = 10
+
+# Baseline gap between adjacent legend rows (in font-size units). Kept tight
+# so it's comparable to the within-entry line gap set via _LEGEND_STATS_LINESPACING.
+_LEGEND_LABELSPACING = 0.2
+
+# Linespacing for the 2-line "Label: last / max X, min Y" legend entries,
+# tuned so the gap between those two lines visually matches the gap the
+# legend's own labelspacing puts between that entry and the next row (e.g.
+# the percentile line) — by default a Text's internal line gap is much
+# tighter than the legend's row-to-row gap, which is what looked uneven.
+_LEGEND_STATS_LINESPACING = 1.5
 
 
 def _annotate_last_point(ax, dates, values, color="black", fmt="{:.1f}"):
@@ -54,14 +66,15 @@ def _annotate_last_point(ax, dates, values, color="black", fmt="{:.1f}"):
     v = values[valid]
     last_date = dates[valid].iloc[-1]
     last_value = v.iloc[-1]
+    text_color = "red" if last_value < 0 else color
     ax.annotate(
-        _escape_dollar(fmt.format(last_value)),
+        _escape_dollar(_accounting_str(last_value, fmt)),
         xy=(last_date, last_value),
         xytext=(0, -8),
         textcoords="offset points",
         ha="center",
         va="top",
-        color=color,
+        color=text_color,
         fontsize=ANNOTATION_FONTSIZE,
         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85),
         zorder=_ANNOTATION_ZORDER,
@@ -80,12 +93,77 @@ def _percentile_color(percentile):
     return None
 
 
-def _colorize_legend(legend, pct_by_label):
-    """Recolor legend text entries per ``_percentile_color``, matched by label text."""
+def _finalize_legend(legend, pct_by_label):
+    """Recolor percentile entries (per ``_percentile_color``, matched by label
+    text) and open up the line spacing of multi-line stats entries so the
+    within-entry line gap matches the between-row gap set by ``legend()``'s
+    ``labelspacing``. Entries containing an accounting-style negative value
+    (a parenthesized number, from ``_accounting_str``) are colored red unless
+    the percentile coloring already claimed them — a single Text can't have
+    just the negative number colored, so the whole line goes red instead."""
     for text in legend.get_texts():
+        if "\n" in text.get_text():
+            text.set_linespacing(_LEGEND_STATS_LINESPACING)
         color = _percentile_color(pct_by_label.get(text.get_text()))
+        if color is None and "(" in text.get_text():
+            color = "red"
         if color is not None:
             text.set_color(color)
+
+
+def _accounting_tick_formatter(fmt="{:,.0f}"):
+    """Y-axis tick formatter using the same accounting style (parens, no
+    minus sign) as the legend/annotation text, so negative values read
+    consistently across the whole chart."""
+    return mticker.FuncFormatter(lambda value, _pos=None: _accounting_str(value, fmt))
+
+
+def _colorize_negative_yticks(ax):
+    """Color negative y-axis tick labels red, pairing the accounting-style
+    parens set by ``_accounting_tick_formatter`` with the same red used for
+    negative values elsewhere on the chart."""
+    for tick_value, label in zip(ax.get_yticks(), ax.yaxis.get_majorticklabels()):
+        if tick_value < 0:
+            label.set_color("red")
+
+
+def _add_legend_spacer(ax):
+    """Insert a blank legend row to double the visual gap before the next
+    distinct item (e.g. between one series' stats block and the next)."""
+    ax.plot([], [], color="none", label=" ")
+
+
+def _ewma_smooth(values, alpha=0.3, window=5):
+    """5-day trailing exponentially-weighted moving average, for chart display only.
+
+    Weights decay by (1 - alpha) per day back from the point being smoothed —
+    e.g. for alpha=0.3: [1, .7, .49, .343, .2401] for today back to 4 days
+    prior — normalized to sum to 1. The first few valid points ramp up from a
+    1-day to a 4-day window (same decaying weights) since a full 5-day window
+    isn't available yet. The most recent valid point is left unsmoothed (raw),
+    so it always reflects the true latest print. Returns a new Series aligned
+    to ``values``'s index; leading NaNs (before the series has data) pass
+    through unchanged. This is purely a display transform — legend stats
+    (last/max/min/percentile) are computed from the raw series elsewhere.
+    """
+    valid = values.notna()
+    if not valid.any():
+        return values.copy()
+    v = values[valid].to_numpy(dtype=float)
+    decay = 1.0 - alpha
+    n = len(v)
+    smoothed = np.empty(n)
+    for i in range(n):
+        if i == n - 1:
+            smoothed[i] = v[i]
+            continue
+        w = min(i + 1, window)
+        weights = decay ** np.arange(w)
+        window_vals = v[i - w + 1 : i + 1][::-1]
+        smoothed[i] = np.dot(weights, window_vals) / weights.sum()
+    result = values.copy()
+    result[valid] = smoothed
+    return result
 
 
 def _last_valid_value(values):
@@ -102,21 +180,30 @@ def _escape_dollar(text):
     return text.replace("$", r"\$")
 
 
+def _accounting_str(value, fmt="{:.1f}"):
+    """Format a number accounting-style: negatives in parentheses with no minus
+    sign (e.g. -18 -> '(18)'), so they can also be flagged red without a '-'
+    fighting for attention against the color."""
+    return f"({fmt.format(abs(value))})" if value < 0 else fmt.format(value)
+
+
 def _labeled(label, value, fmt="{:.1f}"):
     """Append a formatted latest/level value to a legend label, if available."""
     if value is None or pd.isna(value):
         return label
-    return _escape_dollar(f"{label}: {fmt.format(value)}")
+    return _escape_dollar(f"{label}: {_accounting_str(value, fmt)}")
 
 
 def _range_label(label, low, high, fmt="{:.1f}"):
     """Legend label for a symmetric mean +/- std band, e.g. '+/-1 std range: 17.7 to 42.2'."""
-    return _escape_dollar(f"{label} range: {fmt.format(low)} to {fmt.format(high)}")
+    return _escape_dollar(f"{label} range: {_accounting_str(low, fmt)} to {_accounting_str(high, fmt)}")
 
 
 def _labeled_stats(label, values, fmt="{:.1f}"):
     """Build legend text for a series' last/max/min values, plus a separate
-    percentile-rank line for the last value within the series' own history.
+    percentile line giving the last value's position within the series'
+    own [min, max] range: 100% at the historical max, 0% at the historical
+    min, linear in between — i.e. (last - min) / (max - min).
 
     Keeping last/max/min/percentile in the legend text (rather than drawing
     separate annotations on the chart) avoids reserving extra margin outside
@@ -137,9 +224,13 @@ def _labeled_stats(label, values, fmt="{:.1f}"):
         return label, None, None
     v = values[valid]
     last_value = v.iloc[-1]
-    percentile = v.rank(pct=True).iloc[-1] * 100
+    v_max = v.max()
+    v_min = v.min()
+    value_range = v_max - v_min
+    percentile = 100.0 if value_range == 0 else (last_value - v_min) / value_range * 100
     main_text = _escape_dollar(
-        f"{label}: {fmt.format(last_value)}\nmax {fmt.format(v.max())}, min {fmt.format(v.min())}"
+        f"{label}: {_accounting_str(last_value, fmt)}\n"
+        f"max {_accounting_str(v_max, fmt)}, min {_accounting_str(v_min, fmt)}"
     )
     percentile_text = f"percentile: {percentile:.1f}%"
     return main_text, percentile_text, percentile
@@ -158,8 +249,7 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     bond_history : pd.DataFrame
         Merged bond/CDS history with columns ``ticker``, ``date``, ``cds_spread``,
         ``G_Spread``, ``basis_spread``, ``basis_price``, ``SECURITY_NAME``,
-        ``target_cds_maturity``, ``Markit_ShortName``, and optionally
-        ``cds_spread_5y`` (5Y CDS spread, plotted as a green dotted line if present).
+        ``target_cds_maturity``, ``Markit_ShortName``.
     start_date, end_date : str or None
         Optional ISO-date strings to restrict the plotted time range.
 
@@ -183,6 +273,18 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
     markit_shortname = plot_data["Markit_ShortName"].iloc[0]
     cds_maturity_used = pd.Timestamp(plot_data["target_cds_maturity"].iloc[0]).strftime("%Y-%m-%d")
 
+    # Smoothed series used only for the plotted lines — legend stats
+    # (last/max/min/percentile) are computed from the raw columns above.
+    # The last-point annotations attach to these smoothed series instead,
+    # but since the smoothing leaves the last valid point unchanged, the
+    # value shown is identical to the raw last value either way.
+    plot_data = plot_data.assign(
+        cds_spread_plot=_ewma_smooth(plot_data["cds_spread"]),
+        G_Spread_plot=_ewma_smooth(plot_data["G_Spread"]),
+        basis_spread_plot=_ewma_smooth(plot_data["basis_spread"]),
+        basis_price_plot=_ewma_smooth(plot_data["basis_price"]),
+    )
+
     mean_basis_spread = plot_data["basis_spread"].mean()
     std_basis_spread = plot_data["basis_spread"].std()
 
@@ -199,80 +301,81 @@ def plot_bond_cds_basis(ticker, bond_history, start_date=None, end_date=None):
         _ax.margins(y=0.15)
         _ax.set_axisbelow(True)
         _ax.yaxis.grid(True, color="black", alpha=0.15, linewidth=0.7)
+        _ax.xaxis.grid(True, color="black", alpha=0.08, linewidth=0.5)
 
     ax = axes[0]
     pct_by_label = {}
     label, pct_label, pct = _labeled_stats("CDS Spread", plot_data["cds_spread"])
-    ax.plot(plot_data["date"], plot_data["cds_spread"], color="red", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
-    _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread"], color="red")
+    ax.plot(plot_data["date"], plot_data["cds_spread_plot"], color="red", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
+    _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread_plot"], color="red")
     if pct_label:
         ax.plot([], [], color="none", label=pct_label)
         pct_by_label[pct_label] = pct
+    _add_legend_spacer(ax)
     label, pct_label, pct = _labeled_stats("G-Spread", plot_data["G_Spread"])
-    ax.plot(plot_data["date"], plot_data["G_Spread"], color="blue", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
-    _annotate_last_point(ax, plot_data["date"], plot_data["G_Spread"], color="blue")
+    ax.plot(plot_data["date"], plot_data["G_Spread_plot"], color="blue", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
+    _annotate_last_point(ax, plot_data["date"], plot_data["G_Spread_plot"], color="blue")
     if pct_label:
         ax.plot([], [], color="none", label=pct_label)
         pct_by_label[pct_label] = pct
     if "Benchmark_Spread" in plot_data.columns:
         last_benchmark_spread = _last_valid_value(plot_data["Benchmark_Spread"])
         if last_benchmark_spread is not None:
+            _add_legend_spacer(ax)
             ax.plot([], [], color="none", label=_labeled("Benchmark Spread", last_benchmark_spread))
-    if "cds_spread_5y" in plot_data.columns:
-        label, pct_label, pct = _labeled_stats("5Y CDS Spread", plot_data["cds_spread_5y"])
-        ax.plot(
-            plot_data["date"], plot_data["cds_spread_5y"], color="green", linestyle=":",
-            alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label,
-        )
-        _annotate_last_point(ax, plot_data["date"], plot_data["cds_spread_5y"], color="green")
-        if pct_label:
-            ax.plot([], [], color="none", label=pct_label)
-            pct_by_label[pct_label] = pct
     if "LAST_PRICE" in plot_data.columns:
         last_bond_price = _last_valid_value(plot_data["LAST_PRICE"])
         if last_bond_price is not None:
+            _add_legend_spacer(ax)
             ax.plot([], [], color="none", label=_labeled("Bond Price", last_bond_price, fmt="${:,.2f}"))
     ax.set_title(f"{ticker} ({security_name}) CDS Spread (Mat: {cds_maturity_used}) vs G-Spread over time", fontsize=TITLE_FONTSIZE, fontweight="bold")
     ax.set_ylabel("Spread (bps)", fontsize=LABEL_FONTSIZE, fontweight="bold")
-    legend = ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left", bbox_to_anchor=(1.02, 1))
-    _colorize_legend(legend, pct_by_label)
+    legend = ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left", bbox_to_anchor=(1.02, 1), labelspacing=_LEGEND_LABELSPACING)
+    _finalize_legend(legend, pct_by_label)
+    ax.yaxis.set_major_formatter(_accounting_tick_formatter())
+    _colorize_negative_yticks(ax)
 
     ax = axes[1]
     label, pct_label, pct = _labeled_stats("Spread Basis", plot_data["basis_spread"])
     pct_by_label = {}
-    ax.plot(plot_data["date"], plot_data["basis_spread"], color="tab:blue", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
-    _annotate_last_point(ax, plot_data["date"], plot_data["basis_spread"], color="tab:blue")
+    ax.plot(plot_data["date"], plot_data["basis_spread_plot"], color="blue", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
+    _annotate_last_point(ax, plot_data["date"], plot_data["basis_spread_plot"], color="blue")
     if pct_label:
         ax.plot([], [], color="none", label=pct_label)
         pct_by_label[pct_label] = pct
+    _add_legend_spacer(ax)
     ax.axhline(mean_basis_spread, color="black", linestyle="--", linewidth=1 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_labeled("Mean", mean_basis_spread))
-    ax.axhline(mean_basis_spread + std_basis_spread, color="gold", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_range_label("±1 std", mean_basis_spread - std_basis_spread, mean_basis_spread + std_basis_spread))
-    ax.axhline(mean_basis_spread - std_basis_spread, color="gold", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA)
+    ax.axhline(mean_basis_spread + std_basis_spread, color="orange", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_range_label("±1 std", mean_basis_spread - std_basis_spread, mean_basis_spread + std_basis_spread))
+    ax.axhline(mean_basis_spread - std_basis_spread, color="orange", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA)
     ax.axhline(mean_basis_spread + 2 * std_basis_spread, color="red", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_range_label("±2 std", mean_basis_spread - 2 * std_basis_spread, mean_basis_spread + 2 * std_basis_spread))
     ax.axhline(mean_basis_spread - 2 * std_basis_spread, color="red", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA)
     ax.set_title(f"{ticker} ({security_name}) Spread Basis (CDS Spread - GSpread) over time", fontsize=TITLE_FONTSIZE, fontweight="bold")
     ax.set_ylabel("Spread Basis (bps)", fontsize=LABEL_FONTSIZE, fontweight="bold")
-    legend = ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left", bbox_to_anchor=(1.02, 1))
-    _colorize_legend(legend, pct_by_label)
+    legend = ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left", bbox_to_anchor=(1.02, 1), labelspacing=_LEGEND_LABELSPACING)
+    _finalize_legend(legend, pct_by_label)
+    ax.yaxis.set_major_formatter(_accounting_tick_formatter())
+    _colorize_negative_yticks(ax)
 
     ax = axes[2]
     label, pct_label, pct = _labeled_stats("Price Basis", plot_data["basis_price"], fmt="${:,.1f}")
     pct_by_label = {}
-    ax.plot(plot_data["date"], plot_data["basis_price"], color="tab:blue", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
-    _annotate_last_point(ax, plot_data["date"], plot_data["basis_price"], color="tab:blue", fmt="${:,.1f}")
+    ax.plot(plot_data["date"], plot_data["basis_price_plot"], color="blue", alpha=_LINE_ALPHA, linewidth=1.5 * _LINE_WIDTH_SCALE, label=label)
+    _annotate_last_point(ax, plot_data["date"], plot_data["basis_price_plot"], color="blue", fmt="${:,.1f}")
     if pct_label:
         ax.plot([], [], color="none", label=pct_label)
         pct_by_label[pct_label] = pct
+    _add_legend_spacer(ax)
     ax.axhline(mean_basis_price, color="black", linestyle="--", linewidth=1 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_labeled("Mean", mean_basis_price, fmt="${:,.1f}"))
-    ax.axhline(mean_basis_price + std_basis_price, color="gold", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_range_label("±1 std", mean_basis_price - std_basis_price, mean_basis_price + std_basis_price, fmt="${:,.1f}"))
-    ax.axhline(mean_basis_price - std_basis_price, color="gold", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA)
+    ax.axhline(mean_basis_price + std_basis_price, color="orange", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_range_label("±1 std", mean_basis_price - std_basis_price, mean_basis_price + std_basis_price, fmt="${:,.1f}"))
+    ax.axhline(mean_basis_price - std_basis_price, color="orange", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA)
     ax.axhline(mean_basis_price + 2 * std_basis_price, color="red", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA, label=_range_label("±2 std", mean_basis_price - 2 * std_basis_price, mean_basis_price + 2 * std_basis_price, fmt="${:,.1f}"))
     ax.axhline(mean_basis_price - 2 * std_basis_price, color="red", linestyle="--", linewidth=1.2 * _LINE_WIDTH_SCALE, alpha=_LINE_ALPHA)
-    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.1f}"))
+    ax.yaxis.set_major_formatter(_accounting_tick_formatter("${:,.1f}"))
     ax.set_title(f"{ticker} ({security_name}) Price Basis (Upfront + Bond Price) over time", fontsize=TITLE_FONTSIZE, fontweight="bold")
     ax.set_ylabel("Price Basis", fontsize=LABEL_FONTSIZE, fontweight="bold")
-    legend = ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left", bbox_to_anchor=(1.02, 1))
-    _colorize_legend(legend, pct_by_label)
+    legend = ax.legend(fontsize=LEGEND_FONTSIZE, loc="upper left", bbox_to_anchor=(1.02, 1), labelspacing=_LEGEND_LABELSPACING)
+    _finalize_legend(legend, pct_by_label)
+    _colorize_negative_yticks(ax)
 
     date_formatter = mdates.DateFormatter("%d%b%y")
     for ax in axes:
