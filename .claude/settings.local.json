@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(cd *)",
+      "Bash(C:\\\\Users\\\\mmoore\\\\AppData\\\\Local\\\\pypoetry\\\\Cache\\\\virtualenvs\\\\cds-bond-basis-coYwl5DT-py3.12\\\\Scripts\\\\python.exe *)"
     ]
   }
 }
