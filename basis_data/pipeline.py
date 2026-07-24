@@ -36,6 +36,23 @@ CDS_TRANSFORM_COLUMNS = [
     "all_upfront",
 ]
 
+# Low-cardinality descriptive columns -> category dtype (not used as merge
+# keys, so safe to convert without affecting the join logic below).
+CDS_TRANSFORM_CATEGORY_COLUMNS = ["tenor", "cds_index", "tier", "currency", "doc_clause"]
+# Spread/price columns -> float32; full float64 precision isn't needed for
+# basis-point-scale spreads and this halves their memory footprint.
+CDS_TRANSFORM_FLOAT32_COLUMNS = [
+    "running_coupon", "par_spread", "conv_spread", "upfront",
+    "cds_assumed_recovery", "all_upfront",
+]
+
+
+def _sql_in_clause(values):
+    """Build a SQL `IN (...)` literal list from an iterable of strings, escaping
+    embedded single quotes."""
+    escaped = (str(v).replace("'", "''") for v in values)
+    return "(" + ", ".join(f"'{v}'" for v in escaped) + ")"
+
 
 def next_cds_maturity(maturity):
     """First standard semi-annual CDS maturity (20-Jun or 20-Dec) strictly after `maturity`."""
@@ -85,16 +102,6 @@ def build_bond_history(
     """
     cds_mappings = pd.read_csv(cds_mappings_path, encoding="cp1252")
 
-    cds_transform_interpolated = get_delta_table_mm(
-        "teams.structured_credit_abhutra.cds_transform_interpolated",
-        cache_dir=cache_dir,
-        columns=CDS_TRANSFORM_COLUMNS,
-        where=f"published_date >= '{start_date}'",
-        filename="cds_transform_interpolated_subset_2025.parquet",
-    )
-    if verbose:
-        print("cds_transform_interpolated", cds_transform_interpolated.shape)
-
     cds_mappings_filtered = (
         cds_mappings
         .dropna(subset=["Best_Bond_Proxy_ISIN"])
@@ -107,6 +114,26 @@ def build_bond_history(
         })
         .reset_index(drop=True)
     )
+
+    # Push the ticker universe down to Databricks so only the CDS tickers we
+    # actually have a bond proxy for come back, instead of the full CDS
+    # universe -- this is the bulk of the row-count reduction. Filename must
+    # stay distinct from any previous (unfiltered) cache since freshness is
+    # date-based, not query-aware.
+    tickers_clause = _sql_in_clause(cds_mappings_filtered["ticker"].unique())
+    cds_transform_interpolated = get_delta_table_mm(
+        "teams.structured_credit_abhutra.cds_transform_interpolated",
+        cache_dir=cache_dir,
+        columns=CDS_TRANSFORM_COLUMNS,
+        where=f"published_date >= '{start_date}' AND market_cds_ticker IN {tickers_clause}",
+        filename="cds_transform_interpolated_mapped_tickers_2025.parquet",
+    )
+    for col in CDS_TRANSFORM_CATEGORY_COLUMNS:
+        cds_transform_interpolated[col] = cds_transform_interpolated[col].astype("category")
+    for col in CDS_TRANSFORM_FLOAT32_COLUMNS:
+        cds_transform_interpolated[col] = cds_transform_interpolated[col].astype("float32")
+    if verbose:
+        print("cds_transform_interpolated", cds_transform_interpolated.shape)
 
     bonds = cds_mappings_filtered.copy()
     bonds["security"] = bonds["BOND_ISIN"] + " Corp"
